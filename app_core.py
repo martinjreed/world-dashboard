@@ -14,7 +14,7 @@ from dash import Dash, dcc, html, Input, Output, State, exceptions
 import student_hook as SH
 
 APP_TITLE = "World Metrics Dashboard (Student Edition)"
-DATA_LONG_PATH = Path("world_data_long.csv")
+DATA_LONG_PATH = Path("world_data_long_plus.csv")
 
 # -----------------------------
 # Helpers

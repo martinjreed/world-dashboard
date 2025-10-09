@@ -1,43 +1,54 @@
 """
-student_hook.py  — simplest version
-Edit only the lines under "STUDENT SETTINGS".
-Works with app_core.py (hot-reload supported).
+student_hook.py  — simplified teaching version
+Students only edit the few lines under "STUDENT SETTINGS".
+Works with app_core.py (supports hot reload).
 """
 
 # ===================== STUDENT SETTINGS =====================
 
-# Show these indicators in the dropdown (must exist in CSV or be "my_index" below)
+# Indicators visible in the dashboard dropdown
 VISIBLE_INDICATORS = [
-    "life_expectancy_years",
+    "students_2024",
+    "population_density",
+    "gdp_per_capita_usd",
+    "co2_per_capita_tons",
     "internet_users_pct",
-    "my_index",  # <- your simple composite
+    "renewables_pct_final_energy",
+    "life_expectancy_years",
+    "urban_pop_pct",
+    "my_index",  # ← your composite metric
 ]
 
-# Friendly labels
+# Friendly labels for the UI
 LABELS = {
+    "students_2024": "Nationality of New Students (2024)",
+    "population_density": "Population density (people/km²)",
+    "gdp_per_capita_usd": "GDP per capita (USD)",
+    "co2_per_capita_tons": "CO₂ per capita (tons)",
+    "internet_users_pct": "Internet users (% of population)",
+    "renewables_pct_final_energy": "Renewables (% of final energy)",
     "life_expectancy_years": "Life expectancy (years)",
-    "internet_users_pct": "Internet users (% of pop.)",
-    "my_index": "My Index (0–100)",
+    "urban_pop_pct": "Urban population (% of total)",
+    "my_index": "My Composite Index (0–100)",
 }
 
-# Default map look
+# Default visualisation settings
 DEFAULT_COLOR_SCALE = "Viridis"
 DEFAULT_LOG_SCALE   = False
 
-# Optional per-point transform before plotting (keep it simple)
-VALUE_TRANSFORM = lambda s: s  # e.g., lambda s: s.clip(lower=0)
+# Optional pre-plot transform for outlier control
+VALUE_TRANSFORM = lambda s: s  # e.g. s.clip(lower=0, upper=1e5)
 
-# --- Simple composite definition (students tweak just these) ---
+# --- Simple composite definition (students tweak these) ---
 # Combine indicators with (sign, weight). sign=+1 if higher is better; -1 if lower is better.
 COMPONENTS = [
-    ("life_expectancy_years", +1, 0.5),
-    ("internet_users_pct",    +1, 0.5),
-    # Example to penalize CO₂ if present:
-    # ("co2_per_capita_tons",  -1, 0.2),
+    ("life_expectancy_years", +1, 0.4),
+    ("internet_users_pct",    +1, 0.3),
+    ("co2_per_capita_tons",   -1, 0.3),
 ]
 OUTPUT_SCALE = (0, 100)     # scale final score to 0..100
 NORMALIZATION = "minmax"    # "minmax" or "zscore" per-year
-MIN_COMPONENTS = 1          # require at least this many components present
+MIN_COMPONENTS = 2          # require at least this many components present
 # =============================================================
 
 
@@ -57,6 +68,7 @@ def _norm_per_year(s, mode="minmax"):
         return s * np.nan
     return (s - lo) / (hi - lo)
 
+
 # --------- Required hook: build any derived metrics and append ----------
 def make_derived_metrics(df_long):
     """
@@ -67,7 +79,6 @@ def make_derived_metrics(df_long):
     import numpy as np
     import pandas as pd
 
-    # Quick exit if no components defined
     if not COMPONENTS:
         return df_long
 
@@ -75,7 +86,7 @@ def make_derived_metrics(df_long):
     countries = df_long[["iso3", "country"]].drop_duplicates()
     rows = []
 
-    # Pre-split by indicator for speed
+    # Pre-split by indicator for faster lookups
     by_ind = {ind: g for ind, g in df_long.groupby("indicator")}
 
     for yr in years:
@@ -97,7 +108,7 @@ def make_derived_metrics(df_long):
         if not parts:
             continue
 
-        M = pd.concat(parts, axis=1)  # iso3 x components
+        M = pd.concat(parts, axis=1)  # iso3 × components
         w = pd.Series({name: wt for name, wt in weights}, index=M.columns)
 
         # Weighted average across available components per country
