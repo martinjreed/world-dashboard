@@ -127,6 +127,23 @@ def transform_for_plot(series, SH_module, use_log=False):
         s = np.log10(s)
     return s
 
+def make_log_ticks(vmin, vmax):
+    """
+    Given positive min/max in *linear* space, return (tickvals_log10, ticktext_str)
+    covering whole decades within [vmin, vmax].
+    """
+    if not np.isfinite(vmin) or not np.isfinite(vmax):
+        return [], []
+    vmin = float(vmin); vmax = float(vmax)
+    if vmin <= 0 or vmax <= 0 or vmin >= vmax:
+        return [], []
+    pmin = int(np.floor(np.log10(vmin)))
+    pmax = int(np.ceil(np.log10(vmax)))
+    vals = np.array([10.0**p for p in range(pmin, pmax + 1)], dtype=float)
+    tickvals = np.log10(vals)               # positions in log10 space
+    ticktext = [f"{int(v):,}" if v >= 1 else f"{v:.3g}" for v in vals]  # pretty labels
+    return tickvals.tolist(), ticktext
+
 # -----------------------------
 # Load base data once
 # -----------------------------
@@ -159,6 +176,9 @@ COLOR_SCALES = [
 
 def slider_marks(start, end, step=5):
     return {y: str(y) for y in range(start, end + 1, step)}
+
+
+
 
 # -----------------------------
 # App layout
@@ -362,19 +382,60 @@ def update_map(metric, year, colorscale, log_opts, last_iso3):
     if metric is None or df_current.empty:
         return px.choropleth(), None
 
-    use_log = "log" in (log_opts or [])
+
+    # Filter the data
     d = df_current[(df_current["indicator"] == metric) & (df_current["year"] == year)].copy()
-    # Hide countries with no value automatically from color scaling
-    d["plot_value"] = transform_for_plot(d["value"], SH, use_log)
+    use_log = "log" in (log_opts or [])
+    
+    # Keep both the real and log-transformed versions
+    d["plot_value"] = np.where(d["value"] > 0, np.log10(d["value"]), np.nan) if use_log else d["value"]
+    
+    # Build a hover-friendly version of the value (the real one)
+    def fmt(v):
+        if not np.isfinite(v):
+            return ""
+        if v >= 1e6:
+            return f"{v/1e6:.2f}M"
+        elif v >= 1e3:
+            return f"{v/1e3:.1f}K"
+        elif v >= 1:
+            return f"{v:,.0f}"
+        else:
+            return f"{v:.3f}"
+
+    d["value_display"] = d["value"].apply(fmt)
+    
+    # Build ticks from the *original* positive values (before log transform)
+    orig_pos = d["value"].where(d["value"] > 0).dropna()
+    tickvals, ticktext = ([], [])
+    if use_log and not orig_pos.empty:
+        tickvals, ticktext = make_log_ticks(orig_pos.min(), orig_pos.max())
 
     fig = px.choropleth(
         d,
         locations="iso3",
         color="plot_value",
         hover_name="country",
+        hover_data={
+            "value_display": True,   # show real value nicely formatted
+            "value": False,          # hide the raw number (for safety)
+            "plot_value": False,     # hide log-transformed number
+        },
         color_continuous_scale=colorscale,
         projection="natural earth",
+
     )
+    # Colorbar: show real numbers when using log (we plotted log10, so positions are in log space)
+    if use_log and tickvals:
+        fig.update_layout(coloraxis_colorbar=dict(
+            tickvals=tickvals,      # positions in log10 space
+            ticktext=ticktext,      # human-friendly labels
+            title=SH.LABELS.get(metric, metric),
+        ))
+    else:
+        fig.update_layout(coloraxis_colorbar=dict(
+            title=SH.LABELS.get(metric, metric),
+        ))
     fig.update_layout(
         margin=dict(l=0, r=0, t=0, b=0),
         coloraxis_colorbar=dict(title=SH.LABELS.get(metric, metric)),
