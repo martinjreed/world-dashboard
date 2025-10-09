@@ -16,9 +16,101 @@ import student_hook as SH
 APP_TITLE = "World Metrics Dashboard (Student Edition)"
 DATA_LONG_PATH = Path("world_data_long_plus.csv")
 
+
+
+
 # -----------------------------
 # Helpers
 # -----------------------------
+
+def _norm_per_year(s, mode="minmax"):
+    import numpy as np
+    vals = s.values
+    if mode == "zscore":
+        mu, sd = np.nanmean(vals), np.nanstd(vals)
+        if not np.isfinite(mu) or not np.isfinite(sd) or sd == 0:
+            return s * np.nan
+        z = (s - mu) / sd
+        z = z.clip(-3, 3)
+        return (z + 3) / 6.0
+    lo, hi = np.nanmin(vals), np.nanmax(vals)
+    if not np.isfinite(lo) or not np.isfinite(hi) or lo == hi:
+        return s * np.nan
+    return (s - lo) / (hi - lo)
+
+def make_derived_metrics(df_long, SH_module):
+    """
+    Build derived metrics from COMPOSITES defined in the student hook.
+    """
+    import numpy as np
+    import pandas as pd
+
+    COMPOSITES = getattr(SH_module, "COMPOSITES", {})
+    NORMALIZATION = getattr(SH_module, "NORMALIZATION", "minmax")
+
+    if not COMPOSITES:
+        return df_long
+
+    years = sorted(df_long["year"].dropna().unique())
+    countries = df_long[["iso3", "country"]].drop_duplicates()
+    rows = []
+    by_ind = {ind: g for ind, g in df_long.groupby("indicator")}
+
+    for comp_name, spec in COMPOSITES.items():
+        label = spec.get("label", comp_name)
+        components = spec.get("components", [])
+        out_min, out_max = spec.get("scale", (0, 100))
+        min_components = int(spec.get("min_components", 1))
+        if not components:
+            continue
+
+        for yr in years:
+            parts, weights = [], []
+            for ind_name, sign, w in components:
+                g = by_ind.get(ind_name)
+                if g is None:
+                    continue
+                d = g[g["year"] == yr]
+                if d.empty:
+                    continue
+                s = d.set_index("iso3")["value"]
+                s = _norm_per_year(s, NORMALIZATION)
+                s = s if sign > 0 else (1 - s)
+                parts.append(s.rename(ind_name))
+                weights.append((ind_name, float(w)))
+
+            if not parts:
+                continue
+
+            M = pd.concat(parts, axis=1)
+            w = pd.Series({name: wt for name, wt in weights}, index=M.columns)
+            weighted_sum = (M * w).sum(axis=1, skipna=True)
+            weight_sum = M.notna().mul(w, axis=1).sum(axis=1, skipna=True)
+            count_nonnull = M.notna().sum(axis=1)
+
+            score01 = weighted_sum / weight_sum.replace(0, np.nan)
+            score01 = score01.where(count_nonnull >= min_components, np.nan)
+            score = score01 * (out_min - 0) + 0
+            score = score * (out_max / 1.0)
+
+            for iso3, val in score.items():
+                rows.append({
+                    "iso3": iso3, "year": int(yr),
+                    "indicator": comp_name, "value": val
+                })
+
+        SH_module.LABELS.setdefault(comp_name, label)
+
+    if not rows:
+        return df_long
+
+    new_df = pd.DataFrame(rows).merge(countries, on="iso3", how="left")
+    return pd.concat(
+        [df_long, new_df[["iso3","country","year","indicator","value"]]],
+        ignore_index=True
+    )
+
+
 def build_indicator_options(df_long, SH_module):
     present = sorted(df_long["indicator"].dropna().unique())
     visible = [i for i in SH_module.VISIBLE_INDICATORS if i in present] or present
@@ -53,7 +145,7 @@ df_base["year"] = pd.to_numeric(df_base["year"], errors="coerce").astype("Int64"
 df_base["value"] = pd.to_numeric(df_base["value"], errors="coerce")
 
 # Build current dataframe via student hook (mutable by reload)
-df_current = SH.make_derived_metrics(df_base.copy())
+df_current = make_derived_metrics(df_base.copy(), SH)
 indicator_options = build_indicator_options(df_current, SH)
 
 year_min = int(df_current["year"].min())
@@ -182,7 +274,7 @@ def reload_student(n_clicks):
             SH = importlib.import_module("student_hook")
 
         # Recalculate current dataframe using potentially new derived metrics
-        df_current = SH.make_derived_metrics(df_base.copy())
+        df_current = make_derived_metrics(df_base.copy(), SH)
 
         # Rebuild indicator options and defaults
         indicator_options = build_indicator_options(df_current, SH)
