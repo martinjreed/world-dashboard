@@ -225,6 +225,34 @@ def apply_settings(data):
         data["color_default"],
         data["log_default"],
     )
+# fix for invalid year in data (moves slider to latest year with data)
+@app.callback(
+    Output("year", "min"),
+    Output("year", "max"),
+    Output("year", "value"),
+    Output("year", "marks"),
+    Input("metric", "value"),
+    Input("settings-store", "data"),  # also react after Reload
+)
+def sync_year_slider(metric, _settings):
+    # Default to current global range if anything odd happens
+    global df_current
+    try:
+        d = df_current[df_current["indicator"] == metric]
+        years = sorted(y for y in d["year"].dropna().unique())
+        if not years:
+            # No data for this metric: keep existing slider state unchanged
+            raise exceptions.PreventUpdate
+        min_y, max_y = int(years[0]), int(years[-1])
+        # Snap value to the latest (max) year with data for this metric
+        value = max_y
+        marks = slider_marks(min_y, max_y, step=5 if (max_y - min_y) > 8 else 1)
+        return min_y, max_y, value, marks
+    except exceptions.PreventUpdate:
+        raise
+    except Exception:
+        # On any unexpected error, avoid breaking the UI
+        raise exceptions.PreventUpdate
 
 # -----------------------------
 # Map + Trend callbacks (use df_current + SH each time)

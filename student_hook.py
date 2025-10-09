@@ -1,14 +1,12 @@
 """
-student_hook.py  — simplified teaching version
-Students only edit the few lines under "STUDENT SETTINGS".
-Works with app_core.py (supports hot reload).
+student_hook.py — multi-composite teaching version
+Edit only the settings below. Works with app_core.py (hot reload supported).
 """
 
 # ===================== STUDENT SETTINGS =====================
 
-# Indicators visible in the dashboard dropdown
+# Indicators visible in the dashboard dropdown (must exist in CSV or be composite names below)
 VISIBLE_INDICATORS = [
-    "students_2024",
     "population_density",
     "gdp_per_capita_usd",
     "co2_per_capita_tons",
@@ -16,12 +14,13 @@ VISIBLE_INDICATORS = [
     "renewables_pct_final_energy",
     "life_expectancy_years",
     "urban_pop_pct",
-    "my_index",  # ← your composite metric
+    "students_2024",          # optional (if you merged that extra CSV)
+    "wealth_health_index",    # composite #1
+    "sustainability_index",   # composite #2
 ]
 
 # Friendly labels for the UI
 LABELS = {
-    "students_2024": "Nationality of New Students (2024)",
     "population_density": "Population density (people/km²)",
     "gdp_per_capita_usd": "GDP per capita (USD)",
     "co2_per_capita_tons": "CO₂ per capita (tons)",
@@ -29,27 +28,57 @@ LABELS = {
     "renewables_pct_final_energy": "Renewables (% of final energy)",
     "life_expectancy_years": "Life expectancy (years)",
     "urban_pop_pct": "Urban population (% of total)",
-    "my_index": "My Composite Index (0–100)",
+    "students_2024": "International Students (2024)",
+    "wealth_health_index": "Wealth–Health Index (0–100)",
+    "sustainability_index": "Sustainability Index (0–100)",
 }
 
 # Default visualisation settings
 DEFAULT_COLOR_SCALE = "Viridis"
 DEFAULT_LOG_SCALE   = False
 
-# Optional pre-plot transform for outlier control
-VALUE_TRANSFORM = lambda s: s  # e.g. s.clip(lower=0, upper=1e5)
+# Optional pre-plot transform before mapping (keep simple)
+VALUE_TRANSFORM = lambda s: s  # e.g., lambda s: s.clip(lower=0)
 
-# --- Simple composite definition (students tweak these) ---
-# Combine indicators with (sign, weight). sign=+1 if higher is better; -1 if lower is better.
-COMPONENTS = [
-    ("life_expectancy_years", +1, 0.4),
-    ("internet_users_pct",    +1, 0.3),
-    ("co2_per_capita_tons",   -1, 0.3),
-]
-OUTPUT_SCALE = (0, 100)     # scale final score to 0..100
-NORMALIZATION = "minmax"    # "minmax" or "zscore" per-year
-MIN_COMPONENTS = 2          # require at least this many components present
-# =============================================================
+# ----- Define simple composites here -----
+# Each composite:
+#   name: {
+#     "label": "Shown in UI",
+#     "components": [(indicator_name, sign, weight), ...],  # sign +1 higher-is-better, -1 lower-is-better
+#     "scale": (min, max),                                   # output scaling
+#     "min_components": K                                    # require at least K components present
+#   }
+COMPOSITES = {
+    # Composite #1: wealth + health
+    "wealth_health_index": {
+        "label": "Wealth–Health Index (0–100)",
+        "components": [
+            ("gdp_per_capita_usd",  +1, 0.5),
+            ("life_expectancy_years", +1, 0.5),
+        ],
+        "scale": (0, 100),
+        "min_components": 2,
+    },
+
+    # Composite #2: sustainability = wellbeing + digital access minus emissions
+    "sustainability_index": {
+        "label": "Sustainability Index (0–100)",
+        "components": [
+            ("life_expectancy_years", +1, 0.4),
+            ("internet_users_pct",    +1, 0.3),
+            ("co2_per_capita_tons",   -1, 0.3),
+        ],
+        "scale": (0, 100),
+        "min_components": 2,
+    },
+}
+
+# Normalise each component per-year before weighting:
+#   "minmax" -> rescale to [0,1] by year
+#   "zscore" -> standardise to ~[0,1] using a clipped z-score
+NORMALIZATION = "minmax"
+
+# ================== END STUDENT SETTINGS =====================
 
 
 # --------- Minimal helper: per-year normalization of a Series ---------
@@ -69,17 +98,16 @@ def _norm_per_year(s, mode="minmax"):
     return (s - lo) / (hi - lo)
 
 
-# --------- Required hook: build any derived metrics and append ----------
+# --------- Required hook: build derived metrics and append ------------
 def make_derived_metrics(df_long):
     """
     df_long columns: iso3, country, year, indicator, value
-    Returns df_long with a single extra indicator: 'my_index'
-    (defined by COMPONENTS above). If inputs are missing, it skips.
+    Returns df_long with extra rows for each composite in COMPOSITES.
     """
     import numpy as np
     import pandas as pd
 
-    if not COMPONENTS:
+    if not COMPOSITES:
         return df_long
 
     years = sorted(df_long["year"].dropna().unique())
@@ -89,46 +117,62 @@ def make_derived_metrics(df_long):
     # Pre-split by indicator for faster lookups
     by_ind = {ind: g for ind, g in df_long.groupby("indicator")}
 
-    for yr in years:
-        parts = []
-        weights = []
-        for ind_name, sign, w in COMPONENTS:
-            g = by_ind.get(ind_name)
-            if g is None:
-                continue
-            d = g[g["year"] == yr]
-            if d.empty:
-                continue
-            s = d.set_index("iso3")["value"]
-            s = _norm_per_year(s, NORMALIZATION)
-            s = s if sign > 0 else (1 - s)
-            parts.append(s.rename(ind_name))
-            weights.append((ind_name, float(w)))
+    for comp_name, spec in COMPOSITES.items():
+        label = spec.get("label", comp_name)
+        components = spec.get("components", [])
+        out_min, out_max = spec.get("scale", (0, 100))
+        min_components = int(spec.get("min_components", 1))
 
-        if not parts:
+        if not components:
             continue
 
-        M = pd.concat(parts, axis=1)  # iso3 × components
-        w = pd.Series({name: wt for name, wt in weights}, index=M.columns)
+        for yr in years:
+            parts = []
+            weights = []
+            for ind_name, sign, w in components:
+                g = by_ind.get(ind_name)
+                if g is None:
+                    continue
+                d = g[g["year"] == yr]
+                if d.empty:
+                    continue
+                s = d.set_index("iso3")["value"]
+                s = _norm_per_year(s, NORMALIZATION)
+                s = s if sign > 0 else (1 - s)  # invert if "lower is better"
+                parts.append(s.rename(ind_name))
+                weights.append((ind_name, float(w)))
 
-        # Weighted average across available components per country
-        weighted_sum = (M * w).sum(axis=1, skipna=True)
-        weight_sum = M.notna().mul(w, axis=1).sum(axis=1, skipna=True)
-        count_non_null = M.notna().sum(axis=1)
+            if not parts:
+                continue
 
-        score01 = weighted_sum / weight_sum
-        score01 = score01.where(count_non_null >= MIN_COMPONENTS, np.nan)
+            # Join components on iso3
+            M = pd.concat(parts, axis=1)     # iso3 × components
+            w = pd.Series({name: wt for name, wt in weights}, index=M.columns)
 
-        # Rescale to OUTPUT_SCALE
-        a, b = OUTPUT_SCALE
-        score = score01 * (b - a) + a
+            # Weighted average per country, ignoring missing components
+            weighted_sum = (M * w).sum(axis=1, skipna=True)
+            weight_sum   = M.notna().mul(w, axis=1).sum(axis=1, skipna=True)
+            count_nonnull = M.notna().sum(axis=1)
 
-        for iso3, val in score.items():
-            rows.append({"iso3": iso3, "year": int(yr),
-                         "indicator": "my_index", "value": val})
+            score01 = weighted_sum / weight_sum
+            score01 = score01.where(count_nonnull >= min_components, np.nan)
+
+            # Rescale to (out_min, out_max)
+            score = score01 * (out_max - out_min) + out_min
+
+            for iso3, val in score.items():
+                rows.append({"iso3": iso3, "year": int(yr),
+                             "indicator": comp_name, "value": val})
+
+        # Ensure UI label is available even if not set above
+        LABELS.setdefault(comp_name, label)
 
     if not rows:
         return df_long
 
     new_df = pd.DataFrame(rows).merge(countries, on="iso3", how="left")
-    return pd.concat([df_long, new_df[["iso3","country","year","indicator","value"]]], ignore_index=True)
+    return pd.concat(
+        [df_long, new_df[["iso3", "country", "year", "indicator", "value"]]],
+        ignore_index=True
+    )
+
