@@ -8,10 +8,17 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.express as px
-from dash import Dash, dcc, html, Input, Output, State, exceptions
+from dash import Dash, dcc, html, Input, Output, State, exceptions, ctx
+import base64, os, time
+try:
+    from dash_ace import DashAceEditor as AceEditor
+except Exception:
+    try:
+        from dash_ace.AceEditor import AceEditor
+    except Exception:
+        AceEditor = None  # we'll guard later
 
-# ---- Student config (initial import) ----
-import student_hook as SH
+
 
 APP_TITLE = "World Metrics Dashboard (Student Edition)"
 DATA_LONG_PATH = Path("world_data_long_plus.csv")
@@ -90,8 +97,7 @@ def make_derived_metrics(df_long, SH_module):
 
             score01 = weighted_sum / weight_sum.replace(0, np.nan)
             score01 = score01.where(count_nonnull >= min_components, np.nan)
-            score = score01 * (out_min - 0) + 0
-            score = score * (out_max / 1.0)
+            score = score01 * (out_max - out_min) + out_min
 
             for iso3, val in score.items():
                 rows.append({
@@ -144,6 +150,45 @@ def make_log_ticks(vmin, vmax):
     ticktext = [f"{int(v):,}" if v >= 1 else f"{v:.3g}" for v in vals]  # pretty labels
     return tickvals.tolist(), ticktext
 
+# to provide in app backups when editing
+# Baseline (immutable on refresh) and per-student override
+BASE_FILE = "student_hook.py"
+USER_FILE = "student_hook_local.py"   # edited by the in-Dash editor
+BACKUP_DIR = ".backups"
+
+def _read_text(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return ""
+
+def _write_text_atomic(path, text):
+    import os
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+def _backup(path, text):
+    import os, time
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    name = f"{os.path.basename(path)}.{ts}.bak"
+    bp = os.path.join(BACKUP_DIR, name)
+    _write_text_atomic(bp, text)
+    return bp
+
+def _load_module_from_file(py_path, alias="student_hook_loaded"):
+    """Load a module from an arbitrary file path, bypassing import cache."""
+    import importlib.util, sys
+    spec = importlib.util.spec_from_file_location(alias, py_path)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(mod)  # type: ignore[attr-defined]
+    return mod
+
+
 # -----------------------------
 # Load base data once
 # -----------------------------
@@ -162,6 +207,9 @@ df_base["year"] = pd.to_numeric(df_base["year"], errors="coerce").astype("Int64"
 df_base["value"] = pd.to_numeric(df_base["value"], errors="coerce")
 
 # Build current dataframe via student hook (mutable by reload)
+# ---- Student config (initial import) ----
+import student_hook as SH
+
 df_current = make_derived_metrics(df_base.copy(), SH)
 indicator_options = build_indicator_options(df_current, SH)
 
@@ -192,7 +240,7 @@ app.layout = html.Div(
         html.H2(APP_TITLE, style={"marginBottom": "8px"}),
         html.P("Edit only student_hook.py to change behaviour (add metrics, labels, defaults). "
                "Use the Reload button after saving your changes."),
-
+        html.Div(id="active-config", style={"fontSize":"12px", "color":"#555"}),
         html.Div(
             style={"display": "flex", "gap": "10px", "alignItems": "center",
                    "margin": "6px 0 12px"},
@@ -271,7 +319,53 @@ app.layout = html.Div(
         dcc.Store(id="last_iso3"),
         dcc.Store(id="settings-store"),  # to push updated options/defaults after reload
     ]
+    
 )
+
+# --- Inline Editor Block (always visible at page bottom) ---
+if AceEditor is not None:
+    editor_block = html.Div([
+        html.Hr(),
+        html.H3("Editor (inline)"),
+        html.Div([
+            html.Button("Save", id="ed-save", n_clicks=0, className="btn"),
+            html.Button("Save + Backup", id="ed-save-backup", n_clicks=0, className="btn"),
+            html.Button("Save + Reload", id="ed-save-reload", n_clicks=0, className="btn"),
+            html.Span(id="ed-status", style={"marginLeft": "12px"}),
+        ], style={"margin":"8px 0"}),
+        
+        AceEditor(
+            id="ace",
+            value=_read_text(USER_FILE) or _read_text(BASE_FILE),
+            theme="github",
+            mode="python",
+            tabSize=4,
+            fontSize=14,
+            debounceChangePeriod=250,
+            showPrintMargin=False,
+            highlightActiveLine=True,
+            showGutter=True,
+            wrapEnabled=False,
+            height="50vh",
+            width="100%",
+            setOptions={"useWorker": True},
+            style={"border":"1px solid #ddd","borderRadius":"6px"},
+        ),
+        dcc.Store(id="editor-reload-ping"),
+    ], style={"padding":"10px 12px", "background":"#fafafa", "borderTop":"1px solid #eee"})
+
+    # If your layout is a Div with 'children', append the editor
+    if isinstance(app.layout, html.Div):
+        # If the Div has children list, append. If not, wrap it.
+        if isinstance(app.layout.children, list):
+            app.layout.children.append(editor_block)
+        else:
+            app.layout.children = [app.layout.children, editor_block]
+    else:
+        # Fallback: wrap previous layout in a Div and add editor below
+        app.layout = html.Div([app.layout, editor_block])
+else:
+    print("WARNING: dash-ace not available; inline editor disabled.")
 
 # -----------------------------
 # Reload callback
@@ -345,8 +439,9 @@ def apply_settings(data):
     Output("year", "marks"),
     Input("metric", "value"),
     Input("settings-store", "data"),  # also react after Reload
+    Input("editor-reload-ping","data"),
 )
-def sync_year_slider(metric, _settings):
+def sync_year_slider(metric, _settings, _ping):
     # Default to current global range if anything odd happens
     global df_current
     try:
@@ -478,6 +573,67 @@ def update_trend(clickData, last_iso3, metric):
     )
     return fig
 
+@app.callback(
+    Output("ed-status", "children"),
+    Output("editor-reload-ping", "data"),
+    Input("ed-save", "n_clicks"),
+    Input("ed-save-backup", "n_clicks"),
+    Input("ed-save-reload", "n_clicks"),
+    State("ace", "value"),
+    prevent_initial_call=True,
+)
+def editor_actions(n_save, n_save_bak, n_save_rel, text):
+    if not ctx.triggered_id:
+        raise exceptions.PreventUpdate
+
+    # Always operate on USER_FILE (never touch BASE_FILE)
+    # If USER_FILE doesn't exist yet, first Save will create it.
+    # Optional syntax check (doesn't block save):
+    try:
+        compile(text, USER_FILE, "exec")
+        syntax_msg = "Syntax OK"
+    except Exception as e:
+        syntax_msg = f"⚠️ Syntax warning: {e}"
+
+    # Save or Save+Backup
+    if ctx.triggered_id in ("ed-save", "ed-save-backup", "ed-save-reload"):
+        _write_text_atomic(USER_FILE, text)
+
+    if ctx.triggered_id == "ed-save":
+        return f"Saved to {USER_FILE}. {syntax_msg}", None
+
+    if ctx.triggered_id == "ed-save-backup":
+        bpath = _backup(USER_FILE, text)
+        return f"Saved + backup → {os.path.basename(bpath)}. {syntax_msg}", None
+
+    if ctx.triggered_id == "ed-save-reload":
+        # Backup then try to load USER_FILE for this session
+        bpath = _backup(USER_FILE, text)
+        try:
+            SH = _load_module_from_file(USER_FILE, alias="student_hook_override")
+        except Exception as e:
+            return f"Saved + backup ({os.path.basename(bpath)}), reload failed: {e}", None
+
+        # Recompute with the override module
+        global df_current
+        try:
+            df_current = make_derived_metrics(df_base.copy(), SH)
+        except Exception as e:
+            return f"Saved + backup ({os.path.basename(bpath)}), recompute error: {e}", None
+
+        # Poke stores so other callbacks (e.g., year slider) refresh
+        import time as _t
+        return f"Saved + backup ({os.path.basename(bpath)}). Reloaded override ✓ {syntax_msg}", {"ts": _t.time()}
+
+    return "No action.", None
+
+@app.callback(
+    Output("active-config", "children"),
+    Input("editor-reload-ping", "data")
+)
+def show_active_config(_ping):
+    # If we’ve just reloaded from USER_FILE, say so; otherwise default to BASE_FILE
+    return "Config: using override (student_hook_local.py) this session" if _ping else "Config: baseline (student_hook.py)"
 # -----------------------------
 # Run
 # -----------------------------

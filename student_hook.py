@@ -7,6 +7,7 @@ Edit only the settings below. Works with app_core.py (hot reload supported).
 
 # Indicators visible in the dashboard dropdown (must exist in CSV or be composite names below)
 VISIBLE_INDICATORS = [
+    "students_2024",          # optional (if you merged that extra CSV)
     "population_density",
     "gdp_per_capita_usd",
     "co2_per_capita_tons",
@@ -14,13 +15,13 @@ VISIBLE_INDICATORS = [
     "renewables_pct_final_energy",
     "life_expectancy_years",
     "urban_pop_pct",
-    "students_2024",          # optional (if you merged that extra CSV)
     "wealth_health_index",    # composite #1
     "sustainability_index",   # composite #2
 ]
 
 # Friendly labels for the UI
 LABELS = {
+    "students_2024": "International Students (2024)",
     "population_density": "Population density (people/km²)",
     "gdp_per_capita_usd": "GDP per capita (USD)",
     "co2_per_capita_tons": "CO₂ per capita (tons)",
@@ -28,7 +29,6 @@ LABELS = {
     "renewables_pct_final_energy": "Renewables (% of final energy)",
     "life_expectancy_years": "Life expectancy (years)",
     "urban_pop_pct": "Urban population (% of total)",
-    "students_2024": "International Students (2024)",
     "wealth_health_index": "Wealth–Health Index (0–100)",
     "sustainability_index": "Sustainability Index (0–100)",
 }
@@ -67,16 +67,6 @@ COMPOSITES = {
             ("life_expectancy_years", +1, 0.4),
             ("internet_users_pct",    +1, 0.3),
             ("co2_per_capita_tons",   -1, 0.3),
-        ],
-        "scale": (0, 100),
-        "min_components": 2,
-    },
-    # Composite #2: sustainability = wellbeing + digital access minus emissions
-    "urban_internet_users": {
-        "label": "Sustainability Index (0–100)",
-        "components": [
-            ("urban_internet_users", +1, 0.5),
-            ("internet_users_pct",    +1, 0.5),
         ],
         "scale": (0, 100),
         "min_components": 2,
