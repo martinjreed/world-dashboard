@@ -1,85 +1,110 @@
-# ⚡ Quickstart Guide — World Metrics Dashboard
+# 🌍 Quickstart: World Data Dashboard (Edit `student_hook.py`)
 
-Welcome!  
-This is a lightweight data visualisation dashboard built for students.  
-Follow these **three quick steps** to get started.
-
----
-
-## 1️⃣ Prepare your environment
-
-```bash
-python -m venv .venv
-source .venv/bin/activate       # On Windows: .venv\Scripts\activate
-pip install dash plotly pandas numpy pandas_datareader
-```
+This dashboard maps real-world indicators (GDP, population, CO₂, life expectancy, etc.).  
+You can **create new composite metrics** by editing **`student_hook.py`** only.
 
 ---
 
-## 2️⃣ Create the dataset
+## 1) Run the app
 
-Run the preparation script (internet required once):
-
+**macOS / Linux**
 ```bash
-python prepare_world_dataset.py
+./run.sh
 ```
 
-This downloads world data and saves:
-- `world_data_long.csv`
-- `world_data_wide_latest.csv`
-
-Optional: add your own CSV (e.g. `students_2024.csv`) and merge it:
-
-```bash
-python add_students_data.py
+**Windows**
+```bat
+run.bat
 ```
+
+Open: http://127.0.0.1:8050
 
 ---
 
-## 3️⃣ Launch the dashboard
+## 2) Where to edit
 
-```bash
-python app_core.py
-```
+Use the **Editor (inline)** tab (or your IDE) and open `student_hook.py`. You’ll see:
 
-Then open [http://127.0.0.1:8050](http://127.0.0.1:8050).
-
-- Pick an indicator from the dropdown  
-- Adjust the year slider  
-- Click countries to see their data  
-- Edit `student_hook.py` and press **Reload** in the dashboard
+- `VISIBLE_INDICATORS`: which metrics appear in the dropdown.  
+- `LABELS`: nice names for metrics.  
+- `COMPOSITES`: **where you define new composite metrics**.  
+- `NORMALIZATION`: how the app rescales components before weighting (`"minmax"` or `"zscore"`).  
+- `VALUE_TRANSFORM`: optional last-step transform before plotting.
 
 ---
 
-## ✏️ Editing `student_hook.py`
+## 3) Add a composite metric (your template format)
 
-Change labels, visible metrics, or define your own:
-
+Each composite in `COMPOSITES` looks like:
 ```python
 COMPOSITES = {
-    "wealth_health_index": {
-        "label": "Wealth–Health Index (0–100)",
-        "components": [
-            ("gdp_per_capita_usd", +1, 0.5),
-            ("life_expectancy_years", +1, 0.5),
-        ],
-    },
+  "your_metric_id": {
+    "label": "Shown in UI",
+    "components": [
+        # ("indicator_name", sign, weight)
+        # sign: +1 = higher is better, -1 = lower is better
+        ("gdp_per_capita_usd", +1, 0.5),
+        ("life_expectancy_years", +1, 0.5),
+        # ("co2_per_capita_tons", -1, 0.3),  # example of “lower is better”
+    ],
+    "scale": (0, 100),      # rescale final score to this range
+    "min_components": 2,    # require at least this many present to compute
+  },
 }
 ```
 
-Save → click **Reload student_hook.py** in the dashboard → see your results instantly!
+**Example A — Wealth–Health Index**
+```python
+"wealth_health_index": {
+  "label": "Wealth–Health Index (0–100)",
+  "components": [
+      ("gdp_per_capita_usd",  +1, 0.4),
+      ("life_expectancy_years", +1, 0.6),
+  ],
+  "scale": (0, 100),
+  "min_components": 2,
+},
+```
+
+**Example B — Sustainability Index**
+```python
+"sustainability_index": {
+  "label": "Sustainability Index (0–100)",
+  "components": [
+      ("renewables_pct_final_energy", +1, 0.5),
+      ("life_expectancy_years",       +1, 0.2),
+      ("co2_per_capita_tons",         -1, 0.3),
+  ],
+  "scale": (0, 100),
+  "min_components": 2,
+},
+```
+
+After you add a composite:
+1. Add the **metric id** to `VISIBLE_INDICATORS` so it appears in the dropdown.
+2. Add the **label** to `LABELS` (if not already specified inside `COMPOSITES` by your template).
+
+Click **Save + Reload** in the editor to apply changes.
 
 ---
 
-## 💡 Tips
+## 4) Normalisation & tips
 
-| Action | Shortcut |
-|--------|-----------|
-| Reload your edits | Click “Reload student_hook.py” |
-| Undo mistakes | Use Git or backup copies |
-| Blank map | Try a different year — not all indicators have full data |
+- The app normalises each component **per-year** using `NORMALIZATION`:
+  - `"minmax"` → scales each component to [0, 1] for the selected year, then applies signs and weights.  
+  - `"zscore"` → standardises values; good for heavy-tailed metrics.
+- Weights don’t need to sum to 1 (they’re rebalanced internally), but keeping them near 1.0 total is intuitive.
+- Use `min_components` to avoid noisy scores when data is missing.
+- If the map looks blank, pick a year that has data for your metric.
 
 ---
 
-Enjoy exploring global data — and experiment safely!  
-*Created collaboratively using Vibe Coding in ChatGPT.*
+## 5) Reset to baseline
+
+If edits break the app, refresh the browser (or use the app’s “Reload student_hook.py” button if available) to restore the baseline.
+
+---
+
+**Requirements:** Python ≥ 3.10. First run needs internet to install packages.
+
+*Created for teaching with Plotly Dash and `dash-ace`.*
