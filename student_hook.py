@@ -53,8 +53,8 @@ COMPOSITES = {
     "wealth_health_index": {
         "label": "Wealth–Health Index (0–100)",
         "components": [
-            ("gdp_per_capita_usd",  +1, 0.5),
-            ("life_expectancy_years", +1, 0.5),
+            ("gdp_per_capita_usd",  +1, 0.4),
+            ("life_expectancy_years", +1, 0.6),
         ],
         "scale": (0, 100),
         "min_components": 2,

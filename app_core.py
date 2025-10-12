@@ -301,8 +301,8 @@ app.layout = html.Div(
         dcc.Location(id="url"),
 
         html.H2(APP_TITLE, style={"marginBottom": "8px"}),
-        html.P("Edit only student_hook.py to change behaviour (add metrics, labels, defaults). "
-               "Use the Reload button after saving your changes."),
+        html.P("Edit student_hook.py in the Editor at the bottom of the page to change behaviour (add composit metrics, labels, defaults). "
+               "Use the Save + Reload button in the Editor after making your changes."),
         html.Div(id="active-config", style={"fontSize":"12px", "color":"#555"}),
         html.Div(
             style={"display": "flex", "gap": "10px", "alignItems": "center",
@@ -433,11 +433,61 @@ else:
 # -----------------------------
 # Reload callback
 # -----------------------------
+# IDs used below:
+#   - BASE_FILE  = "student_hook.py"
+#   - USER_FILE  = "student_hook_local.pylocal"   # (recommend non-.py to avoid hot reload loops)
+#   - Button id  = "btn-reload-sh"                # your “🔁 Reload student_hook.py” button
+#   - Status id  = "ed-status"
+#   - Ping store = "editor-reload-ping"
+#   - Ace id     = "ace"
+
+@app.callback(
+    Output("ace", "value", allow_duplicate=True),     # update editor content
+    Output("ed-status", "children", allow_duplicate=True),                  # show status
+    Output("editor-reload-ping", "data", allow_duplicate=True),             # force UI refresh
+    Input("btn-reload", "n_clicks"),
+    prevent_initial_call="initial_duplicate",
+)
+def reload_baseline(n):
+    if not n:
+        raise exceptions.PreventUpdate
+
+    # 1) Read baseline
+    base = _read_text(BASE_FILE)
+    if not base or not base.strip():
+        return no_update, f"❌ Baseline missing/empty: {BASE_FILE}", no_update
+
+    # 2) Overwrite local editable copy with baseline
+    try:
+        _write_text_atomic(USER_FILE, base)
+    except Exception as e:
+        return no_update, f"❌ Could not write local copy {USER_FILE}: {e}", no_update
+
+    # 3) Load baseline module and set it active
+    try:
+        # Use explicit loader so any path works
+        SH_base_live = _load_module_from_file(BASE_FILE, alias="student_hook_base_live")
+    except Exception as e:
+        return no_update, f"❌ Reload baseline failed (module load): {e}", no_update
+
+    # 4) Recompute df_current from the baseline hook
+    try:
+        global SH_ACTIVE, df_current
+        SH_ACTIVE = SH_base_live
+        df_current = make_derived_metrics(df_base.copy(), SH_ACTIVE)
+    except Exception as e:
+        return no_update, f"❌ Reload baseline failed (recompute): {e}", no_update
+
+    # 5) Update editor text and ping downstream callbacks
+    return base, "Baseline reloaded ✓", {"ts": time.time()}
+
+
+
 @app.callback(
     Output("settings-store", "data"),
     Output("reload-status", "children"),
     Input("btn-reload", "n_clicks"),
-    prevent_initial_call=True
+    prevent_initial_call="initial_duplicate"
 )
 def reload_student(n_clicks):
     """Hot-reload student_hook.py and rebuild df_current + options/defaults."""
@@ -679,13 +729,13 @@ def _empty_fig(msg: str):
 
 
 @app.callback(
-    Output("ed-status", "children"),
-    Output("editor-reload-ping", "data"),
+    Output("ed-status", "children", allow_duplicate=True),
+    Output("editor-reload-ping", "data", allow_duplicate=True),
     Input("ed-save", "n_clicks"),
     Input("ed-save-backup", "n_clicks"),
     Input("ed-save-reload", "n_clicks"),
     State("ace", "value"),
-    prevent_initial_call=True,
+    prevent_initial_call='initial_duplicate',
 )
 def editor_actions(n_save, n_save_bak, n_save_rel, text):
     if not ctx.triggered_id:
@@ -744,9 +794,9 @@ def show_active_config(_ping):
 # --- Copy baseline to editable copy on each page load and show it in editor ---
 # --- Initialize editor content on page load without clobbering prior edits ---
 @app.callback(
-    Output("ace", "value"),
+    Output("ace", "value", allow_duplicate=True),
     Input("url", "href"),
-    prevent_initial_call=False,
+    prevent_initial_call="initial_duplicate",
 )
 def _init_page(_href):
     local = _read_text(USER_FILE)
