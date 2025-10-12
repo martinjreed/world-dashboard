@@ -8,7 +8,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.express as px
-from dash import Dash, dcc, html, Input, Output, State, exceptions, ctx
+import plotly.graph_objects as go
+
+from dash import Dash, dcc, html, Input, Output, State, exceptions, ctx, no_update
 import base64, os, time
 try:
     from dash_ace import DashAceEditor as AceEditor
@@ -29,6 +31,16 @@ DATA_LONG_PATH = Path("world_data_long_plus.csv")
 # -----------------------------
 # Helpers
 # -----------------------------
+
+
+def safe_log10(x):
+    """Log10 for scalars or arrays. Nonpositive -> NaN. No runtime warnings."""
+    if np.isscalar(x):
+        x = float(x)
+        return np.log10(x) if x > 0 else np.nan
+    x = np.asarray(x, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(x > 0, np.log10(x), np.nan)
 
 def _norm_per_year(s, mode="minmax"):
     import numpy as np
@@ -130,30 +142,37 @@ def transform_for_plot(series, SH_module, use_log=False):
     s = SH_module.VALUE_TRANSFORM(s)  # student hook
     if use_log:
         s = s.where(s > 0, np.nan)
-        s = np.log10(s)
+        s = safe_log10(s)
     return s
 
 def make_log_ticks(vmin, vmax):
     """
-    Given positive min/max in *linear* space, return (tickvals_log10, ticktext_str)
-    covering whole decades within [vmin, vmax].
+    Given positive min/max in linear space, return (tickvals_log10, ticktext)
+    for whole decades covering [vmin, vmax].
     """
+    try:
+        vmin = float(vmin); vmax = float(vmax)
+    except Exception:
+        return [], []
+
+    # guardrails
     if not np.isfinite(vmin) or not np.isfinite(vmax):
         return [], []
-    vmin = float(vmin); vmax = float(vmax)
     if vmin <= 0 or vmax <= 0 or vmin >= vmax:
         return [], []
+
     pmin = int(np.floor(np.log10(vmin)))
     pmax = int(np.ceil(np.log10(vmax)))
-    vals = np.array([10.0**p for p in range(pmin, pmax + 1)], dtype=float)
-    tickvals = np.log10(vals)               # positions in log10 space
-    ticktext = [f"{int(v):,}" if v >= 1 else f"{v:.3g}" for v in vals]  # pretty labels
+
+    vals = (10.0 ** np.arange(pmin, pmax + 1)).astype(float)
+    tickvals = np.log10(vals)  # positions in log space
+    ticktext = [f"{int(v):,}" if v >= 1 else f"{v:.3g}" for v in vals]
     return tickvals.tolist(), ticktext
 
 # to provide in app backups when editing
 # Baseline (immutable on refresh) and per-student override
 BASE_FILE = "student_hook.py"
-USER_FILE = "student_hook_local.py"   # edited by the in-Dash editor
+USER_FILE = "student_hook_local.pylocal"   # edited by the in-Dash editor
 BACKUP_DIR = ".backups"
 
 def _read_text(path):
@@ -179,14 +198,36 @@ def _backup(path, text):
     _write_text_atomic(bp, text)
     return bp
 
+
 def _load_module_from_file(py_path, alias="student_hook_loaded"):
-    """Load a module from an arbitrary file path, bypassing import cache."""
-    import importlib.util, sys
-    spec = importlib.util.spec_from_file_location(alias, py_path)
+    import os
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+
+    if not os.path.exists(py_path):
+        raise FileNotFoundError(f"Edited file not found: {py_path}")
+    if os.path.isdir(py_path):
+        raise IsADirectoryError(f"Expected a file, found directory: {py_path}")
+
+    # Optional: guard against empty file
+    try:
+        with open(py_path, "r", encoding="utf-8") as f:
+            src = f.read()
+    except Exception as e:
+        raise OSError(f"Cannot read {py_path}: {e}")
+    if not src.strip():
+        raise ValueError(f"Edited file is empty: {py_path}")
+
+    # Use an explicit SourceFileLoader so any extension works (.pylocal, .txt, etc.)
+    loader = SourceFileLoader(alias, py_path)
+    spec = importlib.util.spec_from_loader(alias, loader)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not create import spec for {py_path}")
+
     mod = importlib.util.module_from_spec(spec)
-    assert spec and spec.loader
     spec.loader.exec_module(mod)  # type: ignore[attr-defined]
     return mod
+
 
 
 # -----------------------------
@@ -209,6 +250,26 @@ df_base["value"] = pd.to_numeric(df_base["value"], errors="coerce")
 # Build current dataframe via student hook (mutable by reload)
 # ---- Student config (initial import) ----
 import student_hook as SH
+
+# Use a global pointer to whichever SH is active (baseline at startup)
+SH_ACTIVE = SH
+
+
+def _read_text(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return ""
+
+def _write_text_atomic(path, text):
+    import os
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
 
 df_current = make_derived_metrics(df_base.copy(), SH)
 indicator_options = build_indicator_options(df_current, SH)
@@ -237,6 +298,8 @@ app.layout = html.Div(
     style={"fontFamily": "system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
            "padding": "16px", "maxWidth": "1200px", "margin": "0 auto"},
     children=[
+        dcc.Location(id="url"),
+
         html.H2(APP_TITLE, style={"marginBottom": "8px"}),
         html.P("Edit only student_hook.py to change behaviour (add metrics, labels, defaults). "
                "Use the Reload button after saving your changes."),
@@ -413,24 +476,7 @@ def reload_student(n_clicks):
     except Exception as e:
         return None, f"Reload failed: {e}"
 
-# Apply new settings to controls when settings-store updates
-@app.callback(
-    Output("metric", "options"),
-    Output("metric", "value"),
-    Output("colorscale", "value"),
-    Output("logscale", "value"),
-    Input("settings-store", "data"),
-    prevent_initial_call=True
-)
-def apply_settings(data):
-    if not data:
-        raise exceptions.PreventUpdate
-    return (
-        data["indicator_options"],
-        data["metric_default"],
-        data["color_default"],
-        data["log_default"],
-    )
+
 # fix for invalid year in data (moves slider to latest year with data)
 @app.callback(
     Output("year", "min"),
@@ -464,6 +510,35 @@ def sync_year_slider(metric, _settings, _ping):
 # -----------------------------
 # Map + Trend callbacks (use df_current + SH each time)
 # -----------------------------
+
+from dash import no_update
+
+def _build_metric_options_from_active():
+    if df_current is None or df_current.empty:
+        return []
+    return build_indicator_options(df_current, SH_ACTIVE)
+
+@app.callback(
+    Output("metric", "options"),
+    Output("metric", "value"),
+    Input("url", "href"),                   # initial page load
+    Input("editor-reload-ping", "data"),    # after Save + Reload
+    State("metric", "value"),
+)
+def refresh_metric_options(_href, _ping, current_value):
+    opts = _build_metric_options_from_active()
+    if not opts:
+        return [], None
+    values = [o["value"] for o in opts]
+    new_val = current_value if current_value in values else values[0]
+    return opts, new_val
+
+def _empty_map(msg):
+    fig = go.Figure()
+    fig.add_annotation(text=msg, showarrow=False, x=0.5, y=0.5, xref="paper", yref="paper")
+    fig.update_layout(xaxis=dict(visible=False), yaxis=dict(visible=False), margin=dict(l=20,r=20,t=30,b=20))
+    return fig
+
 @app.callback(
     Output("world_map", "figure"),
     Output("last_iso3", "data"),
@@ -471,107 +546,137 @@ def sync_year_slider(metric, _settings, _ping):
     Input("year", "value"),
     Input("colorscale", "value"),
     Input("logscale", "value"),
+    Input("editor-reload-ping", "data"),     # ensures re-run after Save+Reload
     State("last_iso3", "data"),
 )
-def update_map(metric, year, colorscale, log_opts, last_iso3):
-    if metric is None or df_current.empty:
-        return px.choropleth(), None
+def update_map(metric, year, colorscale, log_opts, _ping, last_iso3):
+    # pick current dataframe (or use _active_df(cfg_mode) if you have baseline/override)
+    df = df_current
 
+    # 1) Validate metric
+    if not metric or df.empty or "indicator" not in df.columns:
+        return _empty_map("No data"), last_iso3
 
-    # Filter the data
-    d = df_current[(df_current["indicator"] == metric) & (df_current["year"] == year)].copy()
-    use_log = "log" in (log_opts or [])
-    
-    # Keep both the real and log-transformed versions
-    d["plot_value"] = np.where(d["value"] > 0, np.log10(d["value"]), np.nan) if use_log else d["value"]
-    
-    # Build a hover-friendly version of the value (the real one)
-    def fmt(v):
-        if not np.isfinite(v):
-            return ""
-        if v >= 1e6:
-            return f"{v/1e6:.2f}M"
-        elif v >= 1e3:
-            return f"{v/1e3:.1f}K"
-        elif v >= 1:
-            return f"{v:,.0f}"
-        else:
-            return f"{v:.3f}"
+    d_all = df[df["indicator"] == metric]
+    if d_all.empty:
+        return _empty_map(f"No data for '{metric}'"), last_iso3
 
-    d["value_display"] = d["value"].apply(fmt)
-    
-    # Build ticks from the *original* positive values (before log transform)
-    orig_pos = d["value"].where(d["value"] > 0).dropna()
-    tickvals, ticktext = ([], [])
-    if use_log and not orig_pos.empty:
-        tickvals, ticktext = make_log_ticks(orig_pos.min(), orig_pos.max())
+    # 2) Snap to latest available year if current year has no data
+    if (year is None) or (year not in set(d_all["year"].dropna().astype(int))):
+        yvals = d_all["year"].dropna().astype(int)
+        if yvals.empty:
+            return _empty_map(f"No years for '{metric}'"), last_iso3
+        year = int(yvals.max())
 
+    d = d_all[d_all["year"] == year].copy()
+    if d.empty:
+        return _empty_map(f"No data for '{metric}' in {year}"), last_iso3
+
+    # 3) Log handling (robust)
+    use_log = isinstance(log_opts, (list, tuple, set)) and ("log" in log_opts)
+    d["plot_value"] = safe_log10(d["value"]) if use_log else d["value"]
+
+    # 4) Build figure
     fig = px.choropleth(
         d,
         locations="iso3",
         color="plot_value",
         hover_name="country",
-        hover_data={
-            "value_display": True,   # show real value nicely formatted
-            "value": False,          # hide the raw number (for safety)
-            "plot_value": False,     # hide log-transformed number
-        },
-        color_continuous_scale=colorscale,
-        projection="natural earth",
-
-    )
-    # Colorbar: show real numbers when using log (we plotted log10, so positions are in log space)
-    if use_log and tickvals:
-        fig.update_layout(coloraxis_colorbar=dict(
-            tickvals=tickvals,      # positions in log10 space
-            ticktext=ticktext,      # human-friendly labels
-            title=SH.LABELS.get(metric, metric),
-        ))
-    else:
-        fig.update_layout(coloraxis_colorbar=dict(
-            title=SH.LABELS.get(metric, metric),
-        ))
-    fig.update_layout(
-        margin=dict(l=0, r=0, t=0, b=0),
-        coloraxis_colorbar=dict(title=SH.LABELS.get(metric, metric)),
+        color_continuous_scale=colorscale or "Viridis",
     )
 
-    keep = last_iso3 if last_iso3 and (d["iso3"] == last_iso3).any() else None
-    return fig, keep
+    # Show REAL values in hover (not log)
+    label = getattr(SH, "LABELS", {}).get(metric, metric)
+    fig.update_traces(
+        customdata=np.c_[d["value"].to_numpy()],
+        hovertemplate=f"%{{hovertext}}<br>{label}: %{{customdata[0]:,.4g}}<extra></extra>",
+    )
+
+    # 5) Log colorbar ticks (real numbers on labels)
+    if use_log:
+        orig_pos = d["value"].where(d["value"] > 0).dropna()
+        if not orig_pos.empty:
+            tickvals, ticktext = make_log_ticks(orig_pos.min(), orig_pos.max())
+            if tickvals and ticktext:
+                fig.update_layout(coloraxis_colorbar=dict(tickvals=tickvals, ticktext=ticktext))
+
+    fig.update_layout(margin=dict(l=10, r=10, t=40, b=10), title=f"{label} — {year}")
+    return fig, last_iso3
 
 @app.callback(
     Output("country_trend", "figure"),
     Input("world_map", "clickData"),
     Input("last_iso3", "data"),
     Input("metric", "value"),
+    Input("editor-reload-ping", "data"),   # re-run after Save+Reload
 )
-def update_trend(clickData, last_iso3, metric):
-    label = SH.LABELS.get(metric, metric)
-    dm = df_current[df_current["indicator"] == metric]
+def update_trend(clickData, last_iso3, metric, _ping):
+    # pick the active dataframe
+    df = df_current  # if you use baseline/override helpers, call _active_df(cfg_mode)
 
+    # 1) Resolve ISO3 from click or stored value
     iso3 = None
-    if clickData and "points" in clickData and clickData["points"]:
-        iso3 = clickData["points"][0].get("location")
-    elif last_iso3:
+    if clickData and isinstance(clickData, dict):
+        try:
+            iso3 = clickData["points"][0].get("location")
+        except Exception:
+            iso3 = None
+    if not iso3:
         iso3 = last_iso3
 
-    if iso3:
-        dm = dm[dm["iso3"] == iso3].sort_values("year")
-        title = f"{dm['country'].iloc[0] if not dm.empty else iso3} — {label}"
-    else:
-        dm = dm.iloc[0:0]
-        title = "Click a country on the map to see its time series"
+    # 2) If still nothing, pick a sensible default: top country by latest non-NaN value
+    if not iso3:
+        dm = df[df["indicator"] == metric]
+        if dm.empty:
+            return _empty_fig(f"No data for '{metric}'")
+        latest = dm.dropna(subset=["value"])
+        if latest.empty:
+            return _empty_fig(f"No valid values for '{metric}'")
+        # choose the most recent year’s top value
+        y = latest["year"].max()
+        top = latest[latest["year"] == y].sort_values("value", ascending=False).head(1)
+        if top.empty:
+            return _empty_fig(f"No values for '{metric}' in {y}")
+        iso3 = top["iso3"].iloc[0]
 
-    # Apply the same pre-plot transform (without log) for consistency
-    dm = dm.assign(value_transformed=SH.VALUE_TRANSFORM(dm["value"]))
-    fig = px.line(dm, x="year", y="value_transformed", markers=True, hover_data=["country"])
+    # 3) Build the time series for this country & metric
+    series = df[(df["indicator"] == metric) & (df["iso3"] == iso3)][["year", "value"]].dropna()
+    if series.empty:
+        return _empty_fig(f"No data for {iso3} on '{metric}'")
+
+    series = series.sort_values("year")
+    label = SH.LABELS.get(metric, metric) if hasattr(SH, "LABELS") else metric
+    country_name = df.loc[df["iso3"] == iso3, "country"].dropna().head(1).tolist()
+    country_name = country_name[0] if country_name else iso3
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=series["year"],
+        y=series["value"],
+        mode="lines+markers",
+        name=country_name,
+        hovertemplate=f"{country_name}<br>Year=%{{x}}<br>{label}=%{{y}}<extra></extra>",
+    ))
     fig.update_layout(
-        title=title,
+        title=f"{label} — {country_name}",
         xaxis_title="Year",
         yaxis_title=label,
-        margin=dict(l=40, r=10, t=50, b=40),
+        margin=dict(l=40, r=20, t=60, b=40),
+        hovermode="x unified",
     )
     return fig
+
+
+def _empty_fig(msg: str):
+    fig = go.Figure()
+    fig.add_annotation(text=msg, showarrow=False, xref="paper", yref="paper", x=0.5, y=0.5)
+    fig.update_layout(
+        xaxis=dict(visible=False),
+        yaxis=dict(visible=False),
+        margin=dict(l=40, r=20, t=40, b=40),
+    )
+    return fig
+
 
 @app.callback(
     Output("ed-status", "children"),
@@ -585,47 +690,49 @@ def update_trend(clickData, last_iso3, metric):
 def editor_actions(n_save, n_save_bak, n_save_rel, text):
     if not ctx.triggered_id:
         raise exceptions.PreventUpdate
+    action = ctx.triggered_id
 
-    # Always operate on USER_FILE (never touch BASE_FILE)
-    # If USER_FILE doesn't exist yet, first Save will create it.
-    # Optional syntax check (doesn't block save):
+    # Always save to USER_FILE
+    try:
+        _write_text_atomic(USER_FILE, text)
+    except Exception as e:
+        return f"❌ Save failed to {USER_FILE}: {e}", no_update
+
+    # Syntax check (warn but continue)
     try:
         compile(text, USER_FILE, "exec")
         syntax_msg = "Syntax OK"
     except Exception as e:
         syntax_msg = f"⚠️ Syntax warning: {e}"
 
-    # Save or Save+Backup
-    if ctx.triggered_id in ("ed-save", "ed-save-backup", "ed-save-reload"):
-        _write_text_atomic(USER_FILE, text)
+    if action == "ed-save":
+        return f"Saved → {os.path.basename(USER_FILE)}. {syntax_msg}", no_update
 
-    if ctx.triggered_id == "ed-save":
-        return f"Saved to {USER_FILE}. {syntax_msg}", None
-
-    if ctx.triggered_id == "ed-save-backup":
+    if action == "ed-save-backup":
         bpath = _backup(USER_FILE, text)
-        return f"Saved + backup → {os.path.basename(bpath)}. {syntax_msg}", None
+        return f"Saved + backup → {os.path.basename(bpath)}. {syntax_msg}", no_update
 
     if ctx.triggered_id == "ed-save-reload":
-        # Backup then try to load USER_FILE for this session
         bpath = _backup(USER_FILE, text)
         try:
-            SH = _load_module_from_file(USER_FILE, alias="student_hook_override")
+            SH_override = _load_module_from_file(USER_FILE, alias="student_hook_override")
         except Exception as e:
             return f"Saved + backup ({os.path.basename(bpath)}), reload failed: {e}", None
+
+        # 👇 persist the active module globally for later callbacks
+        global SH_ACTIVE
+        SH_ACTIVE = SH_override
 
         # Recompute with the override module
         global df_current
         try:
-            df_current = make_derived_metrics(df_base.copy(), SH)
+            df_current = make_derived_metrics(df_base.copy(), SH_ACTIVE)
         except Exception as e:
             return f"Saved + backup ({os.path.basename(bpath)}), recompute error: {e}", None
 
-        # Poke stores so other callbacks (e.g., year slider) refresh
         import time as _t
         return f"Saved + backup ({os.path.basename(bpath)}). Reloaded override ✓ {syntax_msg}", {"ts": _t.time()}
 
-    return "No action.", None
 
 @app.callback(
     Output("active-config", "children"),
@@ -634,6 +741,23 @@ def editor_actions(n_save, n_save_bak, n_save_rel, text):
 def show_active_config(_ping):
     # If we’ve just reloaded from USER_FILE, say so; otherwise default to BASE_FILE
     return "Config: using override (student_hook_local.py) this session" if _ping else "Config: baseline (student_hook.py)"
+# --- Copy baseline to editable copy on each page load and show it in editor ---
+# --- Initialize editor content on page load without clobbering prior edits ---
+@app.callback(
+    Output("ace", "value"),
+    Input("url", "href"),
+    prevent_initial_call=False,
+)
+def _init_page(_href):
+    local = _read_text(USER_FILE)
+    if local and local.strip():
+        return local
+    base = _read_text(BASE_FILE)
+    if base and base.strip():
+        _write_text_atomic(USER_FILE, base)  # seed once
+        return base
+    return ""
+
 # -----------------------------
 # Run
 # -----------------------------
@@ -641,5 +765,5 @@ if __name__ == "__main__":
     print(f"Base rows: {len(df_base):,}, current rows: {len(df_current):,}, "
           f"years {year_min}–{year_max}, indicators: "
           f"{', '.join(sorted(df_current['indicator'].unique()))}")
-    app.run(debug=True)  # Dash 3.x
+    app.run(debug=True, dev_tools_hot_reload=False)  # Dash 3.x
 

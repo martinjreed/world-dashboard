@@ -7,7 +7,7 @@ Edit only the settings below. Works with app_core.py (hot reload supported).
 
 # Indicators visible in the dashboard dropdown (must exist in CSV or be composite names below)
 VISIBLE_INDICATORS = [
-    "students_2024",          # optional (if you merged that extra CSV)
+    "students_2024",
     "population_density",
     "gdp_per_capita_usd",
     "co2_per_capita_tons",
@@ -21,7 +21,7 @@ VISIBLE_INDICATORS = [
 
 # Friendly labels for the UI
 LABELS = {
-    "students_2024": "International Students (2024)",
+    "students_2024": "International Students (2024) (best with Log ticked!)",
     "population_density": "Population density (people/km²)",
     "gdp_per_capita_usd": "GDP per capita (USD)",
     "co2_per_capita_tons": "CO₂ per capita (tons)",
@@ -31,7 +31,7 @@ LABELS = {
     "urban_pop_pct": "Urban population (% of total)",
     "wealth_health_index": "Wealth–Health Index (0–100)",
     "sustainability_index": "Sustainability Index (0–100)",
-}
+ }
 
 # Default visualisation settings
 DEFAULT_COLOR_SCALE = "Viridis"
@@ -71,8 +71,7 @@ COMPOSITES = {
         "scale": (0, 100),
         "min_components": 2,
     },
-
-
+ 
 }
 
 # Normalise each component per-year before weighting:
