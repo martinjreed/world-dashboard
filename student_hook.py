@@ -21,7 +21,7 @@ VISIBLE_INDICATORS = [
 
 # Friendly labels for the UI
 LABELS = {
-    "students_2024": "International Students (2024) (best with Log ticked!)",
+    "students_2024": "CSEE Student Nationality (2024) (best with Log ticked!)",
     "population_density": "Population density (people/km²)",
     "gdp_per_capita_usd": "GDP per capita (USD)",
     "co2_per_capita_tons": "CO₂ per capita (tons)",

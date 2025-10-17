@@ -606,11 +606,16 @@ def update_map(metric, year, colorscale, log_opts, _ping, last_iso3):
     # 1) Validate metric
     if not metric or df.empty or "indicator" not in df.columns:
         return _empty_map("No data"), last_iso3
-
-    d_all = df[df["indicator"] == metric]
+    d_all = df[df["indicator"] == metric].copy()
+    # ensure numeric for safety (allows NaN):
+    d_all["value"] = pd.to_numeric(d_all["value"], errors="coerce")
     if d_all.empty:
         return _empty_map(f"No data for '{metric}'"), last_iso3
 
+    # treat zero (and negatives, just in case) as "no data" for students_2024
+    if metric == "students_2024":
+        d_all.loc[(d_all["value"] <= 0) | (~np.isfinite(d_all["value"])), "value"] = np.nan
+        
     # 2) Snap to latest available year if current year has no data
     if (year is None) or (year not in set(d_all["year"].dropna().astype(int))):
         yvals = d_all["year"].dropna().astype(int)
