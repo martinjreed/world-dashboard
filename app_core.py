@@ -1,7 +1,7 @@
 # app_core.py
 # World Metrics Dashboard (Student Edition) with hot-reload of student_hook.py
 
-import sys
+import sys, ast
 import importlib
 from pathlib import Path
 
@@ -25,7 +25,47 @@ except Exception:
 APP_TITLE = "World Metrics Dashboard (Student Edition)"
 DATA_LONG_PATH = Path("world_data_long_plus.csv")
 
+# ----- Safe loader -----
 
+SAFE_BUILTINS = {
+    "True": True, "False": False, "None": None,
+    "len": len, "range": range, "min": min, "max": max,
+    "sum": sum, "abs": abs, "float": float, "int": int,
+    "str": str, "dict": dict, "list": list, "set": set, "tuple": tuple,
+}
+
+def is_safe_student_code(code: str) -> bool:
+    try:
+        tree = ast.parse(code)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                return False
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                if node.func.id in {"open", "exec", "eval", "compile", "input", "__import__"}:
+                    return False
+        return True
+    except Exception:
+        return False
+
+def load_student_hook_secure(code: str):
+    if not is_safe_student_code(code):
+        raise RuntimeError("Unsafe code detected in student_hook.py")
+
+    safe_globals = {"__builtins__": SAFE_BUILTINS}
+    local_vars = {}
+    exec(code, safe_globals, local_vars)
+
+    return {
+        "VISIBLE_INDICATORS": local_vars.get("VISIBLE_INDICATORS", []),
+        "LABELS": local_vars.get("LABELS", {}),
+        "COMPOSITES": local_vars.get("COMPOSITES", {}),
+        "DEFAULT_COLOR_SCALE": local_vars.get("DEFAULT_COLOR_SCALE", "Viridis"),
+        "DEFAULT_LOG_SCALE": local_vars.get("DEFAULT_LOG_SCALE", False),
+        "VALUE_TRANSFORM": local_vars.get("VALUE_TRANSFORM", lambda s: s),
+        "NORMALIZATION": local_vars.get("NORMALIZATION", "minmax"),
+    }
+
+# end safe loader
 
 
 # -----------------------------
@@ -292,7 +332,7 @@ def slider_marks(start, end, step=5):
 # -----------------------------
 # App layout
 # -----------------------------
-app = Dash(__name__, title=APP_TITLE)
+app = Dash(__name__, title=APP_TITLE, suppress_callback_exceptions=True)
 
 app.layout = html.Div(
     style={"fontFamily": "system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
@@ -487,45 +527,38 @@ def reload_baseline(n):
     Output("settings-store", "data"),
     Output("reload-status", "children"),
     Input("btn-reload", "n_clicks"),
-    prevent_initial_call="initial_duplicate"
+    State("editor-code", "data"),  # new store for in-memory code
+    prevent_initial_call=True
 )
-def reload_student(n_clicks):
-    """Hot-reload student_hook.py and rebuild df_current + options/defaults."""
-    global SH, df_current, indicator_options, year_min, year_max
+def reload_student(n_clicks, code):
+    global SH_ACTIVE, df_current, indicator_options, year_min, year_max
+
+    if not code or not code.strip():
+        return None, "⚠️ No code to reload."
 
     try:
-        # Reload module (or import if not present)
-        if "student_hook" in sys.modules:
-            SH = importlib.reload(sys.modules["student_hook"])
-        else:
-            SH = importlib.import_module("student_hook")
-
-        # Recalculate current dataframe using potentially new derived metrics
-        df_current = make_derived_metrics(df_base.copy(), SH)
-
-        # Rebuild indicator options and defaults
-        indicator_options = build_indicator_options(df_current, SH)
-        metric_default = indicator_options[0]["value"] if indicator_options else None
-        color_default = SH.DEFAULT_COLOR_SCALE
-        log_default = ["log"] if SH.DEFAULT_LOG_SCALE else []
-
-        # Recompute year range (in case transforms dropped rows)
-        year_min = int(df_current["year"].min())
-        year_max = int(df_current["year"].max())
-
-        payload = {
-            "indicator_options": indicator_options,
-            "metric_default": metric_default,
-            "color_default": color_default,
-            "log_default": log_default,
-            "labels": SH.LABELS,
-            "year_min": year_min,
-            "year_max": year_max,
-        }
-        return payload, "Reloaded student_hook.py ✅"
+        config = load_student_hook_secure(code)
     except Exception as e:
-        return None, f"Reload failed: {e}"
+        return None, f"❌ Reload failed: {e}"
 
+    # Apply config
+    SH_ACTIVE = type("StudentHook", (), config)
+    df_current = make_derived_metrics(df_base.copy(), SH_ACTIVE)
+    indicator_options = build_indicator_options(df_current, SH_ACTIVE)
+    year_min = int(df_current["year"].min())
+    year_max = int(df_current["year"].max())
+
+    payload = {
+        "indicator_options": indicator_options,
+        "metric_default": indicator_options[0]["value"] if indicator_options else None,
+        "color_default": SH_ACTIVE.DEFAULT_COLOR_SCALE,
+        "log_default": ["log"] if SH_ACTIVE.DEFAULT_LOG_SCALE else [],
+        "labels": SH_ACTIVE.LABELS,
+        "year_min": year_min,
+        "year_max": year_max,
+    }
+
+    return payload, "✅ Reloaded student_hook.py securely"
 
 # fix for invalid year in data (moves slider to latest year with data)
 @app.callback(
@@ -821,4 +854,86 @@ if __name__ == "__main__":
           f"years {year_min}–{year_max}, indicators: "
           f"{', '.join(sorted(df_current['indicator'].unique()))}")
     app.run(debug=True, dev_tools_hot_reload=False)  # Dash 3.x
+
+import ast
+import sys
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from dash import Dash, dcc, html, Input, Output, State, exceptions, ctx, no_update
+
+# Safe built-ins for student code execution
+SAFE_BUILTINS = {
+    "True": True, "False": False, "None": None,
+    "len": len, "range": range, "min": min, "max": max,
+    "sum": sum, "abs": abs, "float": float, "int": int,
+    "str": str, "dict": dict, "list": list, "set": set, "tuple": tuple,
+}
+
+def is_safe_student_code(code: str) -> bool:
+    try:
+        tree = ast.parse(code)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                return False
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                if node.func.id in {"open", "exec", "eval", "compile", "input", "__import__"}:
+                    return False
+        return True
+    except Exception:
+        return False
+
+def load_student_hook_secure(code: str):
+    if not is_safe_student_code(code):
+        raise RuntimeError("Unsafe code detected in student_hook.py")
+
+    safe_globals = {"__builtins__": SAFE_BUILTINS}
+    local_vars = {}
+    exec(code, safe_globals, local_vars)
+
+    return type("StudentHook", (), {
+        "VISIBLE_INDICATORS": local_vars.get("VISIBLE_INDICATORS", []),
+        "LABELS": local_vars.get("LABELS", {}),
+        "COMPOSITES": local_vars.get("COMPOSITES", {}),
+        "DEFAULT_COLOR_SCALE": local_vars.get("DEFAULT_COLOR_SCALE", "Viridis"),
+        "DEFAULT_LOG_SCALE": local_vars.get("DEFAULT_LOG_SCALE", False),
+        "VALUE_TRANSFORM": local_vars.get("VALUE_TRANSFORM", lambda s: s),
+        "NORMALIZATION": local_vars.get("NORMALIZATION", "minmax"),
+    })
+
+# Example Dash app setup
+app = Dash(__name__)
+app.layout = html.Div([
+    html.H2("Secure Dashboard"),
+    dcc.Textarea(id="editor", style={"width": "100%", "height": "300px"}),
+    html.Button("Reload", id="btn-reload"),
+    html.Div(id="reload-status"),
+    dcc.Store(id="editor-code"),
+])
+
+@app.callback(
+    Output("editor-code", "data"),
+    Input("editor", "value")
+)
+def store_editor_code(value):
+    return value
+
+@app.callback(
+    Output("reload-status", "children"),
+    Input("btn-reload", "n_clicks"),
+    State("editor-code", "data"),
+    prevent_initial_call=True
+)
+def reload_student_hook(n_clicks, code):
+    if not code or not code.strip():
+        return "⚠️ No code to reload."
+    try:
+        SH = load_student_hook_secure(code)
+        return f"✅ Reloaded successfully with {len(SH.VISIBLE_INDICATORS)} indicators."
+    except Exception as e:
+        return f"❌ Reload failed: {e}"
+
+if __name__ == "__main__":
+    app.run(debug=True)
 
