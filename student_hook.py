@@ -5,19 +5,6 @@ Edit only the settings below. Works with app_core.py (hot reload supported).
 
 # ===================== STUDENT SETTINGS =====================
 
-# Indicators visible in the dashboard dropdown (must exist in CSV or be composite names below)
-VISIBLE_INDICATORS = [
-    "students_2024",
-    "population_density",
-    "gdp_per_capita_usd",
-    "co2_per_capita_tons",
-    "internet_users_pct",
-    "renewables_pct_final_energy",
-    "life_expectancy_years",
-    "urban_pop_pct",
-    "wealth_health_index",    # composite #1
-    "sustainability_index",   # composite #2
-]
 
 # Friendly labels for the UI
 LABELS = {

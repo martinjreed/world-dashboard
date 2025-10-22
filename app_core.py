@@ -4,6 +4,7 @@
 import sys, ast
 import importlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -47,6 +48,8 @@ def is_safe_student_code(code: str) -> bool:
     except Exception:
         return False
 
+    from types import SimpleNamespace
+
 def load_student_hook_secure(code: str):
     if not is_safe_student_code(code):
         raise RuntimeError("Unsafe code detected in student_hook.py")
@@ -55,15 +58,18 @@ def load_student_hook_secure(code: str):
     local_vars = {}
     exec(code, safe_globals, local_vars)
 
-    return {
-        "VISIBLE_INDICATORS": local_vars.get("VISIBLE_INDICATORS", []),
-        "LABELS": local_vars.get("LABELS", {}),
-        "COMPOSITES": local_vars.get("COMPOSITES", {}),
-        "DEFAULT_COLOR_SCALE": local_vars.get("DEFAULT_COLOR_SCALE", "Viridis"),
-        "DEFAULT_LOG_SCALE": local_vars.get("DEFAULT_LOG_SCALE", False),
-        "VALUE_TRANSFORM": local_vars.get("VALUE_TRANSFORM", lambda s: s),
-        "NORMALIZATION": local_vars.get("NORMALIZATION", "minmax"),
-    }
+    labels = local_vars.get("LABELS", {})
+    visible_indicators = list(labels.keys())
+
+    return SimpleNamespace(
+        VISIBLE_INDICATORS=visible_indicators,
+        LABELS=labels,
+        COMPOSITES=local_vars.get("COMPOSITES", {}),
+        DEFAULT_COLOR_SCALE=local_vars.get("DEFAULT_COLOR_SCALE", "Viridis"),
+        DEFAULT_LOG_SCALE=local_vars.get("DEFAULT_LOG_SCALE", False),
+        VALUE_TRANSFORM=local_vars.get("VALUE_TRANSFORM", lambda s: s),
+        NORMALIZATION=local_vars.get("NORMALIZATION", "minmax"),
+    )
 
 # end safe loader
 
@@ -171,7 +177,7 @@ def make_derived_metrics(df_long, SH_module):
 
 def build_indicator_options(df_long, SH_module):
     present = sorted(df_long["indicator"].dropna().unique())
-    visible = [i for i in SH_module.VISIBLE_INDICATORS if i in present] or present
+    visible = [i for i in SH_module.LABELS if i in present] or present
     return [
         {"label": SH_module.LABELS.get(ind, ind.replace("_", " ").title()), "value": ind}
         for ind in visible
@@ -212,7 +218,6 @@ def make_log_ticks(vmin, vmax):
 # to provide in app backups when editing
 # Baseline (immutable on refresh) and per-student override
 BASE_FILE = "student_hook.py"
-USER_FILE = "student_hook_local.pylocal"   # edited by the in-Dash editor
 BACKUP_DIR = ".backups"
 
 def _read_text(path):
@@ -439,7 +444,7 @@ if AceEditor is not None:
         
         AceEditor(
             id="ace",
-            value=_read_text(USER_FILE) or _read_text(BASE_FILE),
+            value=_read_text(BASE_FILE),
             theme="github",
             mode="python",
             tabSize=4,
@@ -475,16 +480,15 @@ else:
 # -----------------------------
 # IDs used below:
 #   - BASE_FILE  = "student_hook.py"
-#   - USER_FILE  = "student_hook_local.pylocal"   # (recommend non-.py to avoid hot reload loops)
 #   - Button id  = "btn-reload-sh"                # your “🔁 Reload student_hook.py” button
 #   - Status id  = "ed-status"
 #   - Ping store = "editor-reload-ping"
 #   - Ace id     = "ace"
 
 @app.callback(
-    Output("ace", "value", allow_duplicate=True),     # update editor content
-    Output("ed-status", "children", allow_duplicate=True),                  # show status
-    Output("editor-reload-ping", "data", allow_duplicate=True),             # force UI refresh
+    Output("ace", "value", allow_duplicate=True),  # update editor content
+    Output("ed-status", "children", allow_duplicate=True),  # show status
+    Output("editor-reload-ping", "data", allow_duplicate=True),  # force UI refresh
     Input("btn-reload", "n_clicks"),
     prevent_initial_call="initial_duplicate",
 )
@@ -492,35 +496,29 @@ def reload_baseline(n):
     if not n:
         raise exceptions.PreventUpdate
 
-    # 1) Read baseline
-    base = _read_text(BASE_FILE)
-    if not base or not base.strip():
-        return no_update, f"❌ Baseline missing/empty: {BASE_FILE}", no_update
-
-    # 2) Overwrite local editable copy with baseline
     try:
-        _write_text_atomic(USER_FILE, base)
+        with open("student_hook.py", "r", encoding="utf-8") as f:
+            base_code = f.read()
     except Exception as e:
-        return no_update, f"❌ Could not write local copy {USER_FILE}: {e}", no_update
+        return no_update, f"❌ Failed to read baseline: {e}", no_update
 
-    # 3) Load baseline module and set it active
+    if not base_code.strip():
+        return no_update, "❌ Baseline is empty", no_update
+
     try:
-        # Use explicit loader so any path works
-        SH_base_live = _load_module_from_file(BASE_FILE, alias="student_hook_base_live")
+        SH_base_live = load_student_hook_secure(base_code)
     except Exception as e:
-        return no_update, f"❌ Reload baseline failed (module load): {e}", no_update
+        return no_update, f"❌ Reload failed (unsafe code): {e}", no_update
 
-    # 4) Recompute df_current from the baseline hook
     try:
         global SH_ACTIVE, df_current
         SH_ACTIVE = SH_base_live
         df_current = make_derived_metrics(df_base.copy(), SH_ACTIVE)
     except Exception as e:
-        return no_update, f"❌ Reload baseline failed (recompute): {e}", no_update
+        return no_update, f"❌ Reload failed (recompute): {e}", no_update
 
-    # 5) Update editor text and ping downstream callbacks
-    return base, "Baseline reloaded ✓", {"ts": time.time()}
-
+    import time
+    return base_code, "Baseline reloaded ✅", {"ts": time.time()}
 
 
 @app.callback(
@@ -772,63 +770,54 @@ def _empty_fig(msg: str):
     Input("ed-save", "n_clicks"),
     Input("ed-save-backup", "n_clicks"),
     Input("ed-save-reload", "n_clicks"),
-    State("ace", "value"),
-    prevent_initial_call='initial_duplicate',
+    State("ace", "value"),  # direct from AceEditor
+    prevent_initial_call="initial_duplicate",
 )
 def editor_actions(n_save, n_save_bak, n_save_rel, text):
     if not ctx.triggered_id:
         raise exceptions.PreventUpdate
-    action = ctx.triggered_id
 
-    # Always save to USER_FILE
-    try:
-        _write_text_atomic(USER_FILE, text)
-    except Exception as e:
-        return f"❌ Save failed to {USER_FILE}: {e}", no_update
+    action = ctx.triggered_id
 
     # Syntax check (warn but continue)
     try:
-        compile(text, USER_FILE, "exec")
+        compile(text, "<student_hook>", "exec")
         syntax_msg = "Syntax OK"
     except Exception as e:
         syntax_msg = f"⚠️ Syntax warning: {e}"
 
     if action == "ed-save":
-        return f"Saved → {os.path.basename(USER_FILE)}. {syntax_msg}", no_update
+        return f"Saved to memory. {syntax_msg}", no_update
 
     if action == "ed-save-backup":
-        bpath = _backup(USER_FILE, text)
-        return f"Saved + backup → {os.path.basename(bpath)}. {syntax_msg}", no_update
+        # Optional: store backup in memory or log it
+        return f"Saved + backup (in memory). {syntax_msg}", no_update
 
-    if ctx.triggered_id == "ed-save-reload":
-        bpath = _backup(USER_FILE, text)
+    if action == "ed-save-reload":
         try:
-            SH_override = _load_module_from_file(USER_FILE, alias="student_hook_override")
+            SH_override = load_student_hook_secure(text)
         except Exception as e:
-            return f"Saved + backup ({os.path.basename(bpath)}), reload failed: {e}", None
+            return f"Saved, but reload failed: {e}", None
 
-        # 👇 persist the active module globally for later callbacks
-        global SH_ACTIVE
+        # Persist the active module globally
+        global SH_ACTIVE, df_current
         SH_ACTIVE = SH_override
 
-        # Recompute with the override module
-        global df_current
         try:
             df_current = make_derived_metrics(df_base.copy(), SH_ACTIVE)
         except Exception as e:
-            return f"Saved + backup ({os.path.basename(bpath)}), recompute error: {e}", None
+            return f"Saved, but recompute failed: {e}", None
 
         import time as _t
-        return f"Saved + backup ({os.path.basename(bpath)}). Reloaded override ✓ {syntax_msg}", {"ts": _t.time()}
-
+        return f"Saved + reloaded override ✅ {syntax_msg}", {"ts": _t.time()}
 
 @app.callback(
     Output("active-config", "children"),
     Input("editor-reload-ping", "data")
 )
 def show_active_config(_ping):
-    # If we’ve just reloaded from USER_FILE, say so; otherwise default to BASE_FILE
     return "Config: using override (student_hook_local.py) this session" if _ping else "Config: baseline (student_hook.py)"
+
 # --- Copy baseline to editable copy on each page load and show it in editor ---
 # --- Initialize editor content on page load without clobbering prior edits ---
 @app.callback(
@@ -837,14 +826,8 @@ def show_active_config(_ping):
     prevent_initial_call="initial_duplicate",
 )
 def _init_page(_href):
-    local = _read_text(USER_FILE)
-    if local and local.strip():
-        return local
     base = _read_text(BASE_FILE)
-    if base and base.strip():
-        _write_text_atomic(USER_FILE, base)  # seed once
-        return base
-    return ""
+    return base
 
 # -----------------------------
 # Run
