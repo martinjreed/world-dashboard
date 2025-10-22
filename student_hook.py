@@ -1,12 +1,5 @@
-"""
-student_hook.py — multi-composite teaching version
-Edit only the settings below. Works with app_core.py (hot reload supported).
-"""
 
-# ===================== STUDENT SETTINGS =====================
-
-
-# Friendly labels for the UI
+# Friendly labels for the UI, you can change these (right hand side) as you like
 LABELS = {
     "students_2024": "CSEE Student Nationality (2024) (best with Log ticked!)",
     "population_density": "Population density (people/km²)",
@@ -23,9 +16,7 @@ LABELS = {
 # Default visualisation settings
 DEFAULT_COLOR_SCALE = "Viridis"
 DEFAULT_LOG_SCALE   = False
-
-# Optional pre-plot transform before mapping (keep simple)
-VALUE_TRANSFORM = lambda s: s  # e.g., lambda s: s.clip(lower=0)
+MAP_PROJECTION = "natural earth"  # Try: "orthographic", "equirectangular", "mercator", "miller"
 
 # ----- Define simple composites here -----
 # Each composite:
@@ -35,6 +26,14 @@ VALUE_TRANSFORM = lambda s: s  # e.g., lambda s: s.clip(lower=0)
 #     "scale": (min, max),                                   # output scaling
 #     "min_components": K                                    # require at least K components present
 #   }
+# maybe you could add more! What about:
+#    Green Development Score , made up of renewables_pct_final_energy and co2_per_capita_tons
+#    Urban Wealth Index, made up of gdp_per_capita_usd urban_pop_pct
+#    remember the +1 means the metric helps the index, -1 that it harms the index
+#    you can see that below for co2_per_capita_ton, more is worse!
+
+
+# an easy change would be to change the relative values of the metrics
 COMPOSITES = {
     # Composite #1: wealth + health
     "wealth_health_index": {

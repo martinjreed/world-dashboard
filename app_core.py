@@ -67,8 +67,8 @@ def load_student_hook_secure(code: str):
         COMPOSITES=local_vars.get("COMPOSITES", {}),
         DEFAULT_COLOR_SCALE=local_vars.get("DEFAULT_COLOR_SCALE", "Viridis"),
         DEFAULT_LOG_SCALE=local_vars.get("DEFAULT_LOG_SCALE", False),
-        VALUE_TRANSFORM=local_vars.get("VALUE_TRANSFORM", lambda s: s),
         NORMALIZATION=local_vars.get("NORMALIZATION", "minmax"),
+        MAP_PROJECTION=local_vars.get("MAP_PROJECTION", "natural earth"),
     )
 
 # end safe loader
@@ -185,7 +185,6 @@ def build_indicator_options(df_long, SH_module):
 
 def transform_for_plot(series, SH_module, use_log=False):
     s = series.copy()
-    s = SH_module.VALUE_TRANSFORM(s)  # student hook
     if use_log:
         s = s.where(s > 0, np.nan)
         s = safe_log10(s)
@@ -346,16 +345,12 @@ app.layout = html.Div(
         dcc.Location(id="url"),
 
         html.H2(APP_TITLE, style={"marginBottom": "8px"}),
-        html.P("Edit student_hook.py in the Editor at the bottom of the page to change behaviour (add composit metrics, labels, defaults). "
-               "Use the Save + Reload button in the Editor after making your changes."),
+        html.P("Edit the code in the Editor at the bottom of the page to change behaviour (add composit metrics, labels, defaults). "
+               "Use the Save + Reload button in the Editor after making your changes. If it goes wrong, you can alway reload the page to set it back to the default that works."),
         html.Div(id="active-config", style={"fontSize":"12px", "color":"#555"}),
         html.Div(
             style={"display": "flex", "gap": "10px", "alignItems": "center",
                    "margin": "6px 0 12px"},
-            children=[
-                html.Button("🔁 Reload student_hook.py", id="btn-reload", n_clicks=0),
-                html.Div(id="reload-status", style={"color": "#555"})
-            ]
         ),
 
         # Controls
@@ -436,8 +431,6 @@ if AceEditor is not None:
         html.Hr(),
         html.H3("Editor (inline)"),
         html.Div([
-            html.Button("Save", id="ed-save", n_clicks=0, className="btn"),
-            html.Button("Save + Backup", id="ed-save-backup", n_clicks=0, className="btn"),
             html.Button("Save + Reload", id="ed-save-reload", n_clicks=0, className="btn"),
             html.Span(id="ed-status", style={"marginLeft": "12px"}),
         ], style={"margin":"8px 0"}),
@@ -475,88 +468,6 @@ if AceEditor is not None:
 else:
     print("WARNING: dash-ace not available; inline editor disabled.")
 
-# -----------------------------
-# Reload callback
-# -----------------------------
-# IDs used below:
-#   - BASE_FILE  = "student_hook.py"
-#   - Button id  = "btn-reload-sh"                # your “🔁 Reload student_hook.py” button
-#   - Status id  = "ed-status"
-#   - Ping store = "editor-reload-ping"
-#   - Ace id     = "ace"
-
-@app.callback(
-    Output("ace", "value", allow_duplicate=True),  # update editor content
-    Output("ed-status", "children", allow_duplicate=True),  # show status
-    Output("editor-reload-ping", "data", allow_duplicate=True),  # force UI refresh
-    Input("btn-reload", "n_clicks"),
-    prevent_initial_call="initial_duplicate",
-)
-def reload_baseline(n):
-    if not n:
-        raise exceptions.PreventUpdate
-
-    try:
-        with open("student_hook.py", "r", encoding="utf-8") as f:
-            base_code = f.read()
-    except Exception as e:
-        return no_update, f"❌ Failed to read baseline: {e}", no_update
-
-    if not base_code.strip():
-        return no_update, "❌ Baseline is empty", no_update
-
-    try:
-        SH_base_live = load_student_hook_secure(base_code)
-    except Exception as e:
-        return no_update, f"❌ Reload failed (unsafe code): {e}", no_update
-
-    try:
-        global SH_ACTIVE, df_current
-        SH_ACTIVE = SH_base_live
-        df_current = make_derived_metrics(df_base.copy(), SH_ACTIVE)
-    except Exception as e:
-        return no_update, f"❌ Reload failed (recompute): {e}", no_update
-
-    import time
-    return base_code, "Baseline reloaded ✅", {"ts": time.time()}
-
-
-@app.callback(
-    Output("settings-store", "data"),
-    Output("reload-status", "children"),
-    Input("btn-reload", "n_clicks"),
-    State("editor-code", "data"),  # new store for in-memory code
-    prevent_initial_call=True
-)
-def reload_student(n_clicks, code):
-    global SH_ACTIVE, df_current, indicator_options, year_min, year_max
-
-    if not code or not code.strip():
-        return None, "⚠️ No code to reload."
-
-    try:
-        config = load_student_hook_secure(code)
-    except Exception as e:
-        return None, f"❌ Reload failed: {e}"
-
-    # Apply config
-    SH_ACTIVE = type("StudentHook", (), config)
-    df_current = make_derived_metrics(df_base.copy(), SH_ACTIVE)
-    indicator_options = build_indicator_options(df_current, SH_ACTIVE)
-    year_min = int(df_current["year"].min())
-    year_max = int(df_current["year"].max())
-
-    payload = {
-        "indicator_options": indicator_options,
-        "metric_default": indicator_options[0]["value"] if indicator_options else None,
-        "color_default": SH_ACTIVE.DEFAULT_COLOR_SCALE,
-        "log_default": ["log"] if SH_ACTIVE.DEFAULT_LOG_SCALE else [],
-        "labels": SH_ACTIVE.LABELS,
-        "year_min": year_min,
-        "year_max": year_max,
-    }
-
-    return payload, "✅ Reloaded student_hook.py securely"
 
 # fix for invalid year in data (moves slider to latest year with data)
 @app.callback(
@@ -670,7 +581,7 @@ def update_map(metric, year, colorscale, log_opts, _ping, last_iso3):
         hover_name="country",
         color_continuous_scale=colorscale or "Viridis",
     )
-
+    fig.update_geos(projection_type=getattr(SH_ACTIVE, "MAP_PROJECTION", "natural earth"))
     # Show REAL values in hover (not log)
     label = getattr(SH, "LABELS", {}).get(metric, metric)
     fig.update_traces(
@@ -767,13 +678,11 @@ def _empty_fig(msg: str):
 @app.callback(
     Output("ed-status", "children", allow_duplicate=True),
     Output("editor-reload-ping", "data", allow_duplicate=True),
-    Input("ed-save", "n_clicks"),
-    Input("ed-save-backup", "n_clicks"),
     Input("ed-save-reload", "n_clicks"),
     State("ace", "value"),  # direct from AceEditor
     prevent_initial_call="initial_duplicate",
 )
-def editor_actions(n_save, n_save_bak, n_save_rel, text):
+def editor_actions(n_save_rel, text):
     if not ctx.triggered_id:
         raise exceptions.PreventUpdate
 
@@ -785,13 +694,6 @@ def editor_actions(n_save, n_save_bak, n_save_rel, text):
         syntax_msg = "Syntax OK"
     except Exception as e:
         syntax_msg = f"⚠️ Syntax warning: {e}"
-
-    if action == "ed-save":
-        return f"Saved to memory. {syntax_msg}", no_update
-
-    if action == "ed-save-backup":
-        # Optional: store backup in memory or log it
-        return f"Saved + backup (in memory). {syntax_msg}", no_update
 
     if action == "ed-save-reload":
         try:
@@ -816,18 +718,7 @@ def editor_actions(n_save, n_save_bak, n_save_rel, text):
     Input("editor-reload-ping", "data")
 )
 def show_active_config(_ping):
-    return "Config: using override (student_hook_local.py) this session" if _ping else "Config: baseline (student_hook.py)"
-
-# --- Copy baseline to editable copy on each page load and show it in editor ---
-# --- Initialize editor content on page load without clobbering prior edits ---
-@app.callback(
-    Output("ace", "value", allow_duplicate=True),
-    Input("url", "href"),
-    prevent_initial_call="initial_duplicate",
-)
-def _init_page(_href):
-    base = _read_text(BASE_FILE)
-    return base
+    return "Config: using your new code (reload page to reset)" if _ping else "Config: using default"
 
 # -----------------------------
 # Run
@@ -881,7 +772,6 @@ def load_student_hook_secure(code: str):
         "COMPOSITES": local_vars.get("COMPOSITES", {}),
         "DEFAULT_COLOR_SCALE": local_vars.get("DEFAULT_COLOR_SCALE", "Viridis"),
         "DEFAULT_LOG_SCALE": local_vars.get("DEFAULT_LOG_SCALE", False),
-        "VALUE_TRANSFORM": local_vars.get("VALUE_TRANSFORM", lambda s: s),
         "NORMALIZATION": local_vars.get("NORMALIZATION", "minmax"),
     })
 
