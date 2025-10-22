@@ -1,6 +1,7 @@
 # app_core.py
 # World Metrics Dashboard (Student Edition) with hot-reload of student_hook.py
 
+import argparse
 import sys, ast
 import importlib
 from pathlib import Path
@@ -807,6 +808,14 @@ def reload_student_hook(n_clicks, code):
     except Exception as e:
         return f"❌ Reload failed: {e}"
 
+parser = argparse.ArgumentParser(description="Run the World Metrics Dashboard")
+parser.add_argument("--public", action="store_true", help="Make app accessible to external clients")
+args = parser.parse_args()
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(
+    debug=True,
+    dev_tools_hot_reload=False,
+    host="0.0.0.0", if args.public else "127.0.0.1",
+    port=8050
+    )
 
