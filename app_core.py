@@ -724,98 +724,18 @@ def show_active_config(_ping):
 # -----------------------------
 # Run
 # -----------------------------
-if __name__ == "__main__":
-    print(f"Base rows: {len(df_base):,}, current rows: {len(df_current):,}, "
-          f"years {year_min}–{year_max}, indicators: "
-          f"{', '.join(sorted(df_current['indicator'].unique()))}")
-    app.run(debug=True, dev_tools_hot_reload=False)  # Dash 3.x
-
-import ast
-import sys
-import numpy as np
-import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
-from dash import Dash, dcc, html, Input, Output, State, exceptions, ctx, no_update
-
-# Safe built-ins for student code execution
-SAFE_BUILTINS = {
-    "True": True, "False": False, "None": None,
-    "len": len, "range": range, "min": min, "max": max,
-    "sum": sum, "abs": abs, "float": float, "int": int,
-    "str": str, "dict": dict, "list": list, "set": set, "tuple": tuple,
-}
-
-def is_safe_student_code(code: str) -> bool:
-    try:
-        tree = ast.parse(code)
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                return False
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-                if node.func.id in {"open", "exec", "eval", "compile", "input", "__import__"}:
-                    return False
-        return True
-    except Exception:
-        return False
-
-def load_student_hook_secure(code: str):
-    if not is_safe_student_code(code):
-        raise RuntimeError("Unsafe code detected in student_hook.py")
-
-    safe_globals = {"__builtins__": SAFE_BUILTINS}
-    local_vars = {}
-    exec(code, safe_globals, local_vars)
-
-    return type("StudentHook", (), {
-        "VISIBLE_INDICATORS": local_vars.get("VISIBLE_INDICATORS", []),
-        "LABELS": local_vars.get("LABELS", {}),
-        "COMPOSITES": local_vars.get("COMPOSITES", {}),
-        "DEFAULT_COLOR_SCALE": local_vars.get("DEFAULT_COLOR_SCALE", "Viridis"),
-        "DEFAULT_LOG_SCALE": local_vars.get("DEFAULT_LOG_SCALE", False),
-        "NORMALIZATION": local_vars.get("NORMALIZATION", "minmax"),
-    })
-
-# Example Dash app setup
-app = Dash(__name__)
-app.layout = html.Div([
-    html.H2("Secure Dashboard"),
-    dcc.Textarea(id="editor", style={"width": "100%", "height": "300px"}),
-    html.Button("Reload", id="btn-reload"),
-    html.Div(id="reload-status"),
-    dcc.Store(id="editor-code"),
-])
-
-@app.callback(
-    Output("editor-code", "data"),
-    Input("editor", "value")
-)
-def store_editor_code(value):
-    return value
-
-@app.callback(
-    Output("reload-status", "children"),
-    Input("btn-reload", "n_clicks"),
-    State("editor-code", "data"),
-    prevent_initial_call=True
-)
-def reload_student_hook(n_clicks, code):
-    if not code or not code.strip():
-        return "⚠️ No code to reload."
-    try:
-        SH = load_student_hook_secure(code)
-        return f"✅ Reloaded successfully with {len(SH.VISIBLE_INDICATORS)} indicators."
-    except Exception as e:
-        return f"❌ Reload failed: {e}"
 
 parser = argparse.ArgumentParser(description="Run the World Metrics Dashboard")
 parser.add_argument("--public", action="store_true", help="Make app accessible to external clients")
 args = parser.parse_args()
+
+
 if __name__ == "__main__":
     app.run(
-    debug=True,
-    dev_tools_hot_reload=False,
-    host="0.0.0.0" if args.public else "127.0.0.1",
-    port=8050
+        debug=True,
+        dev_tools_hot_reload=False,
+        host="0.0.0.0" if args.public else "127.0.0.1",
+        port=8050
     )
+
 
